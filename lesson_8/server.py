@@ -25,11 +25,11 @@ def handle_message(message, messages_list, client, CONFIGS):
             and CONFIGS.get('TIME') in message \
             and CONFIGS.get('USER') in message \
             and message[CONFIGS.get('USER')][CONFIGS.get('ACCOUNT_NAME')] == 'Guest':
-        return {CONFIGS.get('RESPONSE'): 200}
-    return {
+        messages_list.append({CONFIGS.get('RESPONSE'): 200})
+    messages_list.append({
         CONFIGS.get('RESPONSE'): 400,
         CONFIGS.get('ERROR'): 'Bad Request'
-    }
+    })
 
 
 def arg_parser(CONFIGS):

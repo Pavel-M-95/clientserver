@@ -3,15 +3,32 @@ import json
 import logging
 import sys
 import socket
+import threading
 import time
 import logs.configuration_client
 from utils.decorators import Log
-from errors import ReqFieldMissingError, ServerError
+from errors import ReqFieldMissingError, ServerError, IncorrectDataRecivedError
 
 from utils.utils import load_configs, send_message, get_message
 
 CONFIGS = dict()
 SERVER_LOGGER = logging.getLogger('client')
+
+
+def help_text():
+    print('Поддерживаемые команды:')
+    print('message - отправить сообщение. Кому и текст будет запрошены отдельно.')
+    print('help - вывести подсказки по командам')
+    print('exit - выход из программы')
+
+
+@Log()
+def create_exit_message(account_name):
+    return {
+        CONFIGS['ACTION']: CONFIGS['EXIT'],
+        CONFIGS['TIME']: time.time(),
+        CONFIGS['ACCOUNT_NAME']: account_name
+    }
 
 
 @Log()
@@ -42,6 +59,25 @@ def get_user_message(sock, CONFIGS, account_name='Guest'):
     }
     SERVER_LOGGER.debug(f'Сформирован словарь сообщения: {message_dict}')
     return message_dict
+
+
+def create_message(sock, account_name='Guest'):
+    to_user = input('Введите получателя сообщения: ')
+    message = input('Введите сообщение для отправки: ')
+    message_dict = {
+        CONFIGS['ACTION']: CONFIGS['MESSAGE'],
+        CONFIGS['SENDER']: account_name,
+        CONFIGS['DESTINATION']: to_user,
+        CONFIGS['TIME']: time.time(),
+        CONFIGS['MESSAGE_TEXT']: message
+    }
+    SERVER_LOGGER.debug(f'Сформирован словарь сообщения: {message_dict}')
+    try:
+        send_message(sock, message_dict, CONFIGS)
+        SERVER_LOGGER.info(f'Отправлено сообщение для пользователя {to_user}')
+    except:
+        SERVER_LOGGER.critical('Потеряно соединение с сервером.')
+        sys.exit(1)
 
 
 def handle_server_message(message, CONFIG):
@@ -89,6 +125,46 @@ def handle_response(message, CONFIGS):
     raise ValueError
 
 
+@Log()
+def message_from_server(sock, my_username):
+    while True:
+        try:
+            message = get_message(sock, CONFIGS)
+            if CONFIGS['ACTION'] in message and message[CONFIGS['ACTION']] == CONFIGS['MESSAGE'] and \
+                    CONFIGS['SENDER'] in message and CONFIGS['DESTINATION'] in message \
+                    and CONFIGS['MESSAGE_TEXT'] in message and message[CONFIGS['DESTINATION']] == my_username:
+                print(f'\nПолучено сообщение от пользователя {message[CONFIGS["SENDER"]]}:'
+                      f'\n{message[CONFIGS["MESSAGE_TEXT"]]}')
+                SERVER_LOGGER.info(f'Получено сообщение от пользователя {message[CONFIGS["SENDER"]]}:'
+                            f'\n{message[CONFIGS["MESSAGE_TEXT"]]}')
+            else:
+                SERVER_LOGGER.error(f'Получено некорректное сообщение с сервера: {message}')
+        except IncorrectDataRecivedError:
+            SERVER_LOGGER.error(f'Не удалось декодировать полученное сообщение.')
+        except (OSError, ConnectionError, ConnectionAbortedError,
+                ConnectionResetError, json.JSONDecodeError):
+            SERVER_LOGGER.critical(f'Потеряно соединение с сервером.')
+            break
+
+
+def user_interactive(sock, username):
+    print(help_text())
+    while True:
+        command = input('Введите команду: ')
+        if command == 'message':
+            create_message(sock, username)
+        elif command == 'help':
+            print(help_text())
+        elif command == 'exit':
+            send_message(sock, create_exit_message(username), CONFIGS)
+            print('Завершение соединения.')
+            SERVER_LOGGER.info('Завершение работы по команде пользователя.')
+            time.sleep(0.5)
+            break
+        else:
+            print('Команда не распознана, попробойте снова. help - вывести поддерживаемые команды.')
+
+
 def main():
     global CONFIGS
     CONFIGS = load_configs(is_server=False)
@@ -98,7 +174,6 @@ def main():
         transport.connect((server_address, server_port))
         send_message(transport, create_presence_message(CONFIGS), CONFIGS)
         answer = handle_response(get_message(transport, CONFIGS), CONFIGS)
-        print(client_mode)
         SERVER_LOGGER.info(f'Установлено соединение с сервером. Ответ сервера: {answer}')
         print(f'Установлено соединение с сервером.')
     except json.JSONDecodeError:
@@ -116,25 +191,35 @@ def main():
             f'конечный компьютер отверг запрос на подключение.')
         sys.exit(1)
     else:
-        if client_mode == 'send':
-            print('Режим работы - отправка сообщений.')
-        else:
-            print('Режим работы - приём сообщений.')
-        while True:
-            print(client_mode)
-            if client_mode == 'send':
-                try:
-                    send_message(transport, get_user_message(transport, CONFIGS), CONFIGS)
-                except (ConnectionResetError, ConnectionError, ConnectionAbortedError):
-                    SERVER_LOGGER.error(f'Соединение с сервером {server_address} было потеряно.')
-                    sys.exit(1)
+        client_name = ''
+        receiver = threading.Thread(target=message_from_server, args=(transport, client_name))
+        receiver.daemon = True
+        receiver.start()
 
-            if client_mode == 'listen':
-                try:
-                    handle_server_message(get_message(transport, CONFIGS), CONFIGS)
-                except (ConnectionResetError, ConnectionError, ConnectionAbortedError):
-                    SERVER_LOGGER.error(f'Соединение с сервером {server_address} было потеряно.')
-                    sys.exit(1)
+        user_interface = threading.Thread(target=user_interactive, args=(transport, client_name))
+        user_interface.daemon = True
+        user_interface.start()
+        SERVER_LOGGER.debug('Запущены процессы')
+
+        # if client_mode == 'send':
+        #     print('Режим работы - отправка сообщений.')
+        # else:
+        #     print('Режим работы - приём сообщений.')
+        # while True:
+        #
+        #     if client_mode == 'send':
+        #         try:
+        #             send_message(transport, get_user_message(transport, CONFIGS), CONFIGS)
+        #         except (ConnectionResetError, ConnectionError, ConnectionAbortedError):
+        #             SERVER_LOGGER.error(f'Соединение с сервером {server_address} было потеряно.')
+        #             sys.exit(1)
+        #
+        #     if client_mode == 'listen':
+        #         try:
+        #             handle_server_message(get_message(transport, CONFIGS), CONFIGS)
+        #         except (ConnectionResetError, ConnectionError, ConnectionAbortedError):
+        #             SERVER_LOGGER.error(f'Соединение с сервером {server_address} было потеряно.')
+        #             sys.exit(1)
 
 
 if __name__ == '__main__':
